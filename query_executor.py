@@ -5,10 +5,10 @@ import argparse
 import readline
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from pathlib import Path
 import tabulate
 from colorama import init, Fore, Style, Back
 import re
-
 
 try:
     from nosql_database import NoSQLDatabase
@@ -142,7 +142,7 @@ class QueryExecutor:
     def execute_insert_sql(self, query: str) -> str:
         """Execute SQL INSERT statement"""
         try:
-            
+         
             
             # Extract container name
             container_match = re.search(r'INSERT\s+INTO\s+(\w+)', query, re.IGNORECASE)
@@ -207,7 +207,7 @@ class QueryExecutor:
             if (json_part.startswith('"') and json_part.endswith('"')) or \
                (json_part.startswith("'") and json_part.endswith("'")):
                 json_str = json_part[1:-1]
-
+                
                 escaped_double = '\\"'
                 escaped_single = "\\'"
                 json_str = json_str.replace(escaped_double, '"').replace(escaped_single, "'")
@@ -256,11 +256,19 @@ class QueryExecutor:
   delete container_name doc_id  - Delete document
   count container_name [WHERE condition]
   
+{self.colorize('Import/Export Commands:', 'bright_yellow')}
+  export [all|container_name] folder_path    - Export to folder
+    export all /path/to/export              - Export all containers
+    export users /path/to/export            - Export specific container
+    export container_name file.json         - Export to single file
+  
+  import folder_path                         - Import all JSONs from folder
+    import /path/to/import                  - Import all JSON files
+    import container_name file.json         - Import single file to container
+  
 {self.colorize('Utility Commands:', 'bright_yellow')}
   clear                         - Clear screen
-  history                       - Show query history
-  export container_name file.json - Export container to file
-  import container_name file.json - Import data from file
+  history                       - Show query history  
   backup [path]                 - Backup entire database
   exit/quit                     - Exit the executor
 
@@ -269,6 +277,8 @@ class QueryExecutor:
   SELECT name, email FROM users WHERE city = 'New York'
   insert users user_123 '{{"name": "John", "age": 30}}'
   count products WHERE price > 100
+  export all ./data_backup
+  import ./data_import
         """
         return help_text
     
@@ -461,8 +471,8 @@ class QueryExecutor:
             return self.colorize("No query history.", 'yellow')
         
         output = f"{self.colorize('Query History:', 'bright_cyan')}\n"
-        for i, entry in enumerate(self.history[-10:], 1):  
-            timestamp = entry['timestamp'][:19]  
+        for i, entry in enumerate(self.history[-10:], 1):  # Show last 10
+            timestamp = entry['timestamp'][:19]  # Remove microseconds
             container = entry.get('container', 'N/A')
             query = entry['query'][:50] + '...' if len(entry['query']) > 50 else entry['query']
             output += f"  {i}. [{timestamp}] [{container}] {query}\n"
@@ -470,45 +480,220 @@ class QueryExecutor:
         return output
     
     def export_command(self, args: List[str]) -> str:
-        """Export container to file"""
-        if len(args) < 2:
-            return self.colorize("Usage: export container_name filename.json", 'yellow')
+        """Export containers to folder or single file"""
+        if not args:
+            return self.colorize("Usage: export [all|container_name] [folder_path|file.json]", 'yellow')
         
-        container_name = args[0]
-        filename = args[1]
+        if len(args) == 1:
+            # Single argument could be folder path for all containers
+            path = args[0]
+            return self._export_all_to_folder(path)
         
+        target = args[0]
+        path = args[1]
+        
+        # Check if path is a directory or file
+        path_obj = Path(path)
+        
+        if target.lower() == 'all':
+            # Export all containers
+            if path_obj.suffix == '.json':
+                return self.colorize("Cannot export all containers to a single JSON file. Use a folder path.", 'red')
+            return self._export_all_to_folder(path)
+        else:
+            # Export specific container
+            if path_obj.suffix == '.json':
+                # Export to single file 
+                return self._export_container_to_file(target, path)
+            else:
+                # Export to folder
+                return self._export_container_to_folder(target, path)
+    
+    def _export_all_to_folder(self, folder_path: str) -> str:
+        """Export all containers to separate JSON files in a folder"""
+        try:
+            # Create folder if it doesn't exist
+            folder = Path(folder_path)
+            folder.mkdir(parents=True, exist_ok=True)
+            
+            containers = self.db.list_containers()
+            if not containers:
+                return self.colorize("No containers to export.", 'yellow')
+            
+            exported_count = 0
+            total_docs = 0
+            
+            for container_name in containers:
+                documents = self.db.get_all_documents(container_name)
+                if documents:
+                    filename = folder / f"{container_name}.json"
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(documents, f, indent=2, ensure_ascii=False)
+                    exported_count += 1
+                    total_docs += len(documents)
+            
+            return self.colorize(
+                f"Exported {exported_count} containers ({total_docs} documents) to folder: {folder_path}", 
+                'green'
+            )
+            
+        except Exception as e:
+            return self.colorize(f"Export failed: {str(e)}", 'red')
+    
+    def _export_container_to_folder(self, container_name: str, folder_path: str) -> str:
+        """Export single container to a folder"""
+        try:
+            # Create folder if it doesn't exist
+            folder = Path(folder_path)
+            folder.mkdir(parents=True, exist_ok=True)
+            
+            documents = self.db.get_all_documents(container_name)
+            if not documents:
+                return self.colorize(f"Container '{container_name}' is empty.", 'yellow')
+            
+            filename = folder / f"{container_name}.json"
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(documents, f, indent=2, ensure_ascii=False)
+            
+            return self.colorize(
+                f"Exported container '{container_name}' ({len(documents)} documents) to: {filename}", 
+                'green'
+            )
+            
+        except Exception as e:
+            return self.colorize(f"Export failed: {str(e)}", 'red')
+    
+    def _export_container_to_file(self, container_name: str, filename: str) -> str:
+        """Export single container to a specific file (original behavior)"""
         try:
             documents = self.db.get_all_documents(container_name)
-            with open(filename, 'w') as f:
-                json.dump(documents, f, indent=2)
-            return self.colorize(f"Exported {len(documents)} documents to {filename}", 'green')
+            if not documents:
+                return self.colorize(f"Container '{container_name}' is empty.", 'yellow')
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(documents, f, indent=2, ensure_ascii=False)
+            
+            return self.colorize(
+                f"Exported {len(documents)} documents from '{container_name}' to {filename}", 
+                'green'
+            )
+            
         except Exception as e:
             return self.colorize(f"Export failed: {str(e)}", 'red')
     
     def import_command(self, args: List[str]) -> str:
-        """Import data from file"""
-        if len(args) < 2:
-            return self.colorize("Usage: import container_name filename.json", 'yellow')
+        """Import data from folder or single file"""
+        if not args:
+            return self.colorize("Usage: import [folder_path|container_name file.json]", 'yellow')
         
-        container_name = args[0]
-        filename = args[1]
-        
+        if len(args) == 1:
+            # Single argument - treat as folder path
+            folder_path = args[0]
+            return self._import_from_folder(folder_path)
+        elif len(args) == 2:
+            # Two arguments - container name and file
+            container_name = args[0]
+            filename = args[1]
+            return self._import_file_to_container(container_name, filename)
+        else:
+            return self.colorize("Usage: import [folder_path|container_name file.json]", 'yellow')
+    
+    def _import_from_folder(self, folder_path: str) -> str:
+        """Import all JSON files from a folder"""
         try:
-            with open(filename, 'r') as f:
-                documents = json.load(f)
+            folder = Path(folder_path)
+            if not folder.exists():
+                return self.colorize(f"Folder not found: {folder_path}", 'red')
             
-            if not isinstance(documents, list):
-                return self.colorize("File must contain a JSON array of documents.", 'red')
+            if not folder.is_dir():
+                return self.colorize(f"Path is not a directory: {folder_path}", 'red')
+            
+            # Find all JSON files
+            json_files = list(folder.glob("*.json"))
+            if not json_files:
+                return self.colorize(f"No JSON files found in folder: {folder_path}", 'yellow')
+            
+            total_imported = 0
+            total_files = 0
+            results = []
+            
+            for json_file in json_files:
+                container_name = json_file.stem  # filename without extension
+                result = self._import_file_to_container(container_name, str(json_file))
+                results.append(f"  {container_name}: {result}")
+                
+                # Extract number of imported documents from result string
+                if "Imported" in result and "/" in result:
+                    try:
+                        imported_part = result.split("Imported ")[1].split("/")[0]
+                        total_imported += int(imported_part)
+                    except:
+                        pass
+                total_files += 1
+            
+            output = self.colorize(f"Folder Import Results ({total_files} files processed):", 'bright_cyan') + "\n"
+            output += "\n".join(results) + "\n\n"
+            output += self.colorize(f"Total documents imported: {total_imported}", 'green')
+            
+            return output
+            
+        except Exception as e:
+            return self.colorize(f"Import from folder failed: {str(e)}", 'red')
+    
+    def _import_file_to_container(self, container_name: str, filename: str) -> str:
+        """Import single file to specific container"""
+        try:
+            if not Path(filename).exists():
+                return self.colorize(f"File not found: {filename}", 'red')
+            
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Handle different JSON structures
+            documents = []
+            if isinstance(data, list):
+                documents = data
+            elif isinstance(data, dict):
+                # If it's a single document, wrap it in a list
+                documents = [data]
+            else:
+                return self.colorize("Invalid JSON format. Expected array or object.", 'red')
+            
+            # Create container if it doesn't exist
+            if container_name not in self.db.list_containers():
+                self.db.create_container(container_name)
             
             imported = 0
-            for i, doc in enumerate(documents):
-                doc_id = doc.get('_id', f'imported_{i+1}')
-                if self.db.insert_document(container_name, doc_id, doc):
-                    imported += 1
+            failed = 0
             
-            return self.colorize(f"Imported {imported}/{len(documents)} documents", 'green')
+            for i, doc in enumerate(documents):
+                if not isinstance(doc, dict):
+                    failed += 1
+                    continue
+                
+                # Generate doc_id if not present
+                doc_id = doc.get('_id') or doc.get('id') or f"imported_{i+1}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+                # Remove _id from document data if present
+                doc_data = {k: v for k, v in doc.items() if k not in ['_id', 'id']}
+                if not doc_data:
+                    doc_data = doc  # Keep original if no other fields
+                
+                if self.db.insert_document(container_name, str(doc_id), doc_data):
+                    imported += 1
+                else:
+                    failed += 1
+            
+            result_msg = f"Imported {imported}/{len(documents)} documents"
+            if failed > 0:
+                result_msg += f" ({failed} failed)"
+            
+            return self.colorize(result_msg, 'green' if failed == 0 else 'yellow')
+            
+        except json.JSONDecodeError as e:
+            return self.colorize(f"Invalid JSON in file {filename}: {str(e)}", 'red')
         except Exception as e:
-            return self.colorize(f"Import failed: {str(e)}", 'red')
+            return self.colorize(f"Import failed for {filename}: {str(e)}", 'red')
     
     def backup_command(self, args: List[str]) -> str:
         """Backup entire database"""
@@ -532,20 +717,20 @@ class QueryExecutor:
         
         while True:
             try:
-              
+                # Create prompt
                 prompt = f"{self.colorize('NoSQL', 'bright_cyan')}"
                 if self.current_container:
                     prompt += f"{self.colorize(f':{self.current_container}', 'bright_yellow')}"
                 prompt += f"{self.colorize('> ', 'white')}"
                 
-               
+                # Get user input
                 query = input(prompt).strip()
                 
                 if query:
                     result = self.execute_query(query)
                     if result:
                         print(result)
-                        print()  
+                        print()  # Add spacing
             
             except KeyboardInterrupt:
                 print(f"\n{self.colorize('Use exit or quit to exit.', 'yellow')}")
@@ -568,7 +753,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Disable colors if requested
+
     if args.no_color:
         init(strip=True)
     
@@ -597,7 +782,7 @@ def main():
         except Exception as e:
             print(f"Error reading file: {e}")
     else:
-       
+        
         executor.run_interactive()
 
 
